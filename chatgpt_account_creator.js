@@ -520,29 +520,65 @@ class ChatGPTAccountCreator {
             }
 
             // =============================================
-            // NEW FLOW: Email → Code → Password → Name → Birthday
+            // NEW FLOW: Email → Password → Code → Name/Age
             // =============================================
 
-            // Step 1: Click Continue after email
-            this.log("🔘 Clicking Continue after email...");
+            // Step 1: Click Continue after email → goes to email-verification
+            this.log("🔘 Step 1: Clicking Continue after email...");
             try {
                 const continueButton = page.getByRole('button', { name: 'Continue', exact: true });
-
                 await Promise.all([
                     page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => { }),
                     continueButton.click({ timeout: 10000 })
                 ]);
-
                 await this.sleep(2000);
-                this.log(`📍 Current URL: ${page.url()}`);
-
+                this.log(`📍 URL: ${page.url()}`);
             } catch (e) {
-                this.log(`❌ Error clicking Continue (email step): ${e.message}`, "ERROR");
+                this.log(`❌ Error clicking Continue: ${e.message}`, "ERROR");
                 return false;
             }
 
-            // Step 2: Poll for verification code every 5 seconds
-            this.log("⏳ Polling for verification code every 5s...");
+            // Step 2: Click "Tiếp tục với mật khẩu" link → goes to /create-account/password
+            this.log("🔑 Step 2: Clicking 'Tiếp tục với mật khẩu'...");
+            try {
+                const passwordLink = page.locator('a[href="/create-account/password"]').first();
+                await passwordLink.waitFor({ state: 'visible', timeout: 10000 });
+                await passwordLink.click({ timeout: 10000 });
+                await this.sleep(2000);
+                this.log(`📍 URL: ${page.url()}`);
+            } catch (e) {
+                this.log(`❌ Error clicking password link: ${e.message}`, "ERROR");
+                return false;
+            }
+
+            // Step 3: Fill password on /create-account/password
+            this.log("🔑 Step 3: Filling password...");
+            try {
+                const passwordInput = page.locator('input[type="password"]').first();
+                await passwordInput.waitFor({ state: 'visible', timeout: 10000 });
+                await passwordInput.fill(password);
+                await this.sleep(this.randomFloat(1000, 2000));
+                this.log("✅ Password filled");
+            } catch (e) {
+                this.log(`❌ Error filling password: ${e.message}`, "ERROR");
+                return false;
+            }
+
+            // Step 4: Click "Tiếp tục" button → goes back to email-verification
+            this.log("🔘 Step 4: Clicking 'Tiếp tục' after password...");
+            try {
+                const submitBtn = page.locator('button[value="validate"], button[type="submit"]').first();
+                await submitBtn.waitFor({ state: 'visible', timeout: 5000 });
+                await submitBtn.click({ timeout: 10000 });
+                await this.sleep(3000);
+                this.log(`📍 URL: ${page.url()}`);
+            } catch (e) {
+                this.log(`❌ Error clicking Continue after password: ${e.message}`, "ERROR");
+                return false;
+            }
+
+            // Step 5: Get the NEWEST verification code from email
+            this.log("⏳ Step 5: Getting verification code from email...");
             const verificationCode = await this.getVerificationCode(emailUsername, emailDomain);
 
             if (!verificationCode) {
@@ -553,182 +589,76 @@ class ChatGPTAccountCreator {
 
             this.log(`✅ Got verification code: ${verificationCode}`);
 
-            // Enter verification code - try multiple selectors
+            // Step 6: Enter verification code
+            this.log("📝 Step 6: Entering verification code...");
             try {
-                let codeInput = null;
+                const codeInput = page.locator('input[name="code"]').first();
+                await codeInput.waitFor({ state: 'visible', timeout: 10000 });
 
-                // Strategy 1: input[name="code"]
-                try {
-                    codeInput = page.locator('input[name="code"]').first();
-                    await codeInput.waitFor({ state: 'visible', timeout: 5000 });
-                } catch {
-                    codeInput = null;
-                }
-
-                // Strategy 2: input[autocomplete="one-time-code"]
-                if (!codeInput) {
-                    try {
-                        codeInput = page.locator('input[autocomplete="one-time-code"]').first();
-                        await codeInput.waitFor({ state: 'visible', timeout: 5000 });
-                    } catch {
-                        codeInput = null;
-                    }
-                }
-
-                // Strategy 3: placeholder "Mã" or "Code"
-                if (!codeInput) {
-                    try {
-                        codeInput = page.getByPlaceholder(/mã|code/i).first();
-                        await codeInput.waitFor({ state: 'visible', timeout: 5000 });
-                    } catch {
-                        codeInput = null;
-                    }
-                }
-
-                // Strategy 4: getByLabel "Mã" or "Code"
-                if (!codeInput) {
-                    try {
-                        codeInput = page.getByLabel(/mã|code/i).first();
-                        await codeInput.waitFor({ state: 'visible', timeout: 5000 });
-                    } catch {
-                        codeInput = null;
-                    }
-                }
-
-                // Strategy 5: getByRole with "Mã" or "Code"
-                if (!codeInput) {
-                    try {
-                        codeInput = page.getByRole('textbox', { name: /mã|code/i });
-                        await codeInput.waitFor({ state: 'visible', timeout: 5000 });
-                    } catch {
-                        codeInput = null;
-                    }
-                }
-
-                if (!codeInput) {
-                    this.log("❌ Could not find code input field", "ERROR");
-                    return false;
-                }
-
-                // Log the input we found for debugging
-                const inputName = await codeInput.getAttribute('name').catch(() => 'unknown');
-                const inputType = await codeInput.getAttribute('type').catch(() => 'unknown');
-                this.log(`🔍 Code input found: name="${inputName}" type="${inputType}"`);
-
-                // Click to focus the input
-                await codeInput.click();
-                await this.sleep(500);
-
-                // Use native value setter + React events (most reliable for React apps)
+                // Use native React value setter
                 await page.evaluate((code) => {
                     const input = document.querySelector('input[name="code"]');
                     if (input) {
-                        // Focus the input
                         input.focus();
-                        // Set value using native setter (triggers React's onChange)
                         const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
                         nativeInputValueSetter.call(input, code);
-                        // Dispatch events that React listens to
                         input.dispatchEvent(new Event('input', { bubbles: true }));
                         input.dispatchEvent(new Event('change', { bubbles: true }));
-                        // Also dispatch React's synthetic event
-                        const reactEvent = new Event('input', { bubbles: true });
-                        Object.defineProperty(reactEvent, 'target', { value: input });
-                        input.dispatchEvent(reactEvent);
                     }
                 }, verificationCode);
                 await this.sleep(500);
 
-                // Verify the value
-                const inputValue = await codeInput.inputValue().catch(() => '');
-                this.log(`🔍 Input value after native setter: "${inputValue}"`);
+                // Verify value
+                const val = await codeInput.inputValue().catch(() => '');
+                this.log(`🔍 Code input value: "${val}"`);
 
-                // If native setter didn't work, try keyboard type
-                if (!inputValue || inputValue.length < 4) {
-                    this.log("⚠️ Native setter didn't work, trying keyboard type...", "WARNING");
+                // Fallback to keyboard type if needed
+                if (!val || val.length < 4) {
                     await codeInput.click();
-                    await codeInput.press('Control+a');
                     await page.keyboard.type(verificationCode, { delay: 200 });
-                    await this.sleep(500);
-                    const val2 = await codeInput.inputValue().catch(() => '');
-                    this.log(`🔍 Input value after keyboard: "${val2}"`);
                 }
-                await this.sleep(1000);
+                await this.sleep(500);
             } catch (e) {
-                this.log(`❌ Error entering verification code: ${e.message}`, "ERROR");
+                this.log(`❌ Error entering code: ${e.message}`, "ERROR");
                 return false;
             }
 
-            // Submit the code form
-            this.log("🔘 Submitting code form...");
+            // Step 7: Click "Tiếp tục" to submit code → goes to /about-you
+            this.log("🔘 Step 7: Clicking 'Tiếp tục' to submit code...");
             try {
-                // Debug: check for validation errors
-                try {
-                    const errorElements = await page.locator('[aria-invalid="true"], [data-invalid="true"]').all();
-                    for (const el of errorElements) {
-                        const name = await el.getAttribute('name').catch(() => '');
-                        const errorId = await el.getAttribute('aria-describedby').catch(() => '');
-                        if (errorId) {
-                            const errorEl = page.locator(`#${errorId}`).first();
-                            const errorText = await errorEl.textContent().catch(() => '');
-                            this.log(`⚠️ Invalid field: name="${name}" error="${errorText}"`, "WARNING");
-                        }
-                    }
-                } catch {}
-
-                // Take screenshot before submit
-                try {
-                    await page.screenshot({ path: '/tmp/debug_before_submit.png', fullPage: true });
-                    this.log("📸 Screenshot: /tmp/debug_before_submit.png");
-                } catch {}
-
-                // Click the Continue button (button[value="validate"])
-                this.log("🔘 Clicking Continue button...");
-                const submitBtn = page.locator('button[value="validate"]').first();
+                const submitBtn = page.locator('button[value="validate"], button[type="submit"]').first();
                 await submitBtn.waitFor({ state: 'visible', timeout: 5000 });
                 await submitBtn.click({ timeout: 10000 });
 
-                // Wait for navigation away from email-verification
-                this.log("⏳ Waiting for navigation...");
+                // Wait for navigation to /about-you
                 try {
-                    await page.waitForURL(url => !url.href.includes('email-verification'), { timeout: 15000 });
+                    await page.waitForURL('**/about-you**', { timeout: 15000 });
                     this.log(`✅ Navigated to: ${page.url()}`);
                 } catch {
-                    this.log(`📍 Still on: ${page.url()}`);
+                    await this.sleep(3000);
+                    this.log(`📍 URL: ${page.url()}`);
                 }
-
-                // Take screenshot after submit
-                try {
-                    await page.screenshot({ path: '/tmp/debug_after_submit.png', fullPage: true });
-                    this.log("📸 Screenshot: /tmp/debug_after_submit.png");
-                } catch {}
             } catch (e) {
-                this.log(`❌ Error submitting code form: ${e.message}`, "ERROR");
+                this.log(`❌ Error submitting code: ${e.message}`, "ERROR");
                 return false;
             }
 
             // =============================================
-            // Step 3: Fill name and age on /about-you page
+            // Step 8: Fill name and age on /about-you page
             // =============================================
 
             this.log(`📍 Current URL: ${page.url()}`);
 
             // Fill name
-            this.log("📝 Filling name...");
-            let nameInput = null;
+            this.log("📝 Step 8: Filling name...");
             try {
-                // Strategy 1: input[name="name"]
+                let nameInput = null;
                 try { nameInput = page.locator('input[name="name"]').first(); await nameInput.waitFor({ state: 'visible', timeout: 10000 }); } catch { nameInput = null; }
-                // Strategy 2: placeholder "Họ và tên" or "Full name"
                 if (!nameInput) { try { nameInput = page.getByPlaceholder(/họ và tên|full name/i).first(); await nameInput.waitFor({ state: 'visible', timeout: 5000 }); } catch { nameInput = null; } }
-                // Strategy 3: placeholder /name/i
-                if (!nameInput) { try { nameInput = page.getByPlaceholder(/name/i).first(); await nameInput.waitFor({ state: 'visible', timeout: 5000 }); } catch { nameInput = null; } }
-                // Strategy 4: any visible text input
                 if (!nameInput) { try { nameInput = page.locator('input[type="text"]').first(); await nameInput.waitFor({ state: 'visible', timeout: 5000 }); } catch { nameInput = null; } }
 
                 if (!nameInput) {
                     this.log("❌ Could not find name input field", "ERROR");
-                    try { await page.screenshot({ path: '/tmp/debug_name_not_found.png' }); } catch {}
                     return false;
                 }
 
@@ -742,17 +672,12 @@ class ChatGPTAccountCreator {
 
             // Fill age
             const age = this.generateRandomAge();
-            this.log(`🎂 Setting age: ${age}`);
-            let ageInput = null;
+            this.log(`🎂 Step 9: Setting age: ${age}`);
             try {
-                // Strategy 1: input[name="age"]
+                let ageInput = null;
                 try { ageInput = page.locator('input[name="age"]').first(); await ageInput.waitFor({ state: 'visible', timeout: 5000 }); } catch { ageInput = null; }
-                // Strategy 2: placeholder "Tuổi" or "Age"
                 if (!ageInput) { try { ageInput = page.getByPlaceholder(/tuổi|age/i).first(); await ageInput.waitFor({ state: 'visible', timeout: 5000 }); } catch { ageInput = null; } }
-                // Strategy 3: input[type="number"]
                 if (!ageInput) { try { ageInput = page.locator('input[type="number"]').first(); await ageInput.waitFor({ state: 'visible', timeout: 5000 }); } catch { ageInput = null; } }
-                // Strategy 4: placeholder /age|tuổi/i
-                if (!ageInput) { try { ageInput = page.getByPlaceholder(/age|tuổi/i).first(); await ageInput.waitFor({ state: 'visible', timeout: 5000 }); } catch { ageInput = null; } }
 
                 if (!ageInput) {
                     this.log("❌ Could not find age input field", "ERROR");
@@ -767,119 +692,17 @@ class ChatGPTAccountCreator {
                 return false;
             }
 
-            // Click Continue/Submit to proceed
-            this.log("🔘 Clicking Continue to proceed...");
+            // Step 10: Click "Tiếp tục" to complete signup
+            this.log("🔘 Step 10: Clicking 'Tiếp tục' to complete signup...");
             try {
-                let submitBtn = null;
-
-                // Strategy 1: button[value="validate"]
-                try { submitBtn = page.locator('button[value="validate"]').first(); await submitBtn.waitFor({ state: 'visible', timeout: 5000 }); } catch { submitBtn = null; }
-                // Strategy 2: button:has-text("Tiếp tục")
-                if (!submitBtn) { try { submitBtn = page.locator('button:has-text("Tiếp tục")').first(); await submitBtn.waitFor({ state: 'visible', timeout: 5000 }); } catch { submitBtn = null; } }
-                // Strategy 3: button[type="submit"]
-                if (!submitBtn) { try { submitBtn = page.locator('button[type="submit"]').first(); await submitBtn.waitFor({ state: 'visible', timeout: 5000 }); } catch { submitBtn = null; } }
-                // Strategy 4: getByRole
-                if (!submitBtn) { try { submitBtn = page.getByRole('button', { name: /Continue|Tiếp tục/i }); await submitBtn.waitFor({ state: 'visible', timeout: 5000 }); } catch { submitBtn = null; } }
-
-                if (!submitBtn) {
-                    this.log("❌ Could not find submit button", "ERROR");
-                    return false;
-                }
-
-                // Check if button is enabled
-                const isEnabled = await submitBtn.isEnabled();
-                if (!isEnabled) {
-                    this.log("⏳ Submit button not enabled, waiting...");
-                    await this.sleep(2000);
-                }
-
-                const box = await submitBtn.boundingBox();
-                if (box) {
-                    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-                    await this.sleep(this.randomFloat(300, 700));
-                }
-
-                try {
-                    await Promise.all([
-                        page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => { }),
-                        submitBtn.click({ timeout: 10000 })
-                    ]);
-                } catch {
-                    await submitBtn.click({ timeout: 10000 });
-                }
-                await this.sleep(this.randomFloat(2000, 3000));
-                this.log(`📍 Current URL: ${page.url()}`);
+                const submitBtn = page.locator('button[value="validate"], button[type="submit"]').first();
+                await submitBtn.waitFor({ state: 'visible', timeout: 5000 });
+                await submitBtn.click({ timeout: 10000 });
+                await this.sleep(5000);
+                this.log(`📍 URL: ${page.url()}`);
             } catch (e) {
-                this.log(`❌ Error clicking Continue: ${e.message}`, "ERROR");
+                this.log(`❌ Error completing signup: ${e.message}`, "ERROR");
                 return false;
-            }
-
-            // =============================================
-            // Step 4: Handle password page (if exists)
-            // =============================================
-            await this.sleep(2000);
-            const currentUrl = page.url();
-            this.log(`📍 Current URL after name/age: ${currentUrl}`);
-
-            // Check if we need to set password
-            let hasPasswordField = false;
-            try { hasPasswordField = await page.locator('input[type="password"]').first().isVisible({ timeout: 3000 }); } catch {}
-            let hasPasswordLink = false;
-            try { hasPasswordLink = await page.locator('a:has-text("password"), button:has-text("password"), a:has-text("mật khẩu"), button:has-text("mật khẩu")').first().isVisible({ timeout: 3000 }); } catch {}
-
-            if (hasPasswordField || hasPasswordLink || currentUrl.includes('password')) {
-                this.log("🔑 Setting up password...");
-
-                // If there's a "Continue with password" link, click it first
-                if (!hasPasswordField && hasPasswordLink) {
-                    try {
-                        const pwLink = page.locator('a:has-text("password"), button:has-text("password"), a:has-text("mật khẩu"), button:has-text("mật khẩu")').first();
-                        await pwLink.click({ timeout: 5000 });
-                        await this.sleep(2000);
-                    } catch {}
-                }
-
-                // Fill password
-                try {
-                    let passwordInput = page.locator('input[type="password"]').first();
-                    await passwordInput.waitFor({ state: 'visible', timeout: 10000 });
-                    await passwordInput.fill(password);
-                    await this.sleep(this.randomFloat(1000, 2000));
-                    this.log("✅ Password filled");
-                } catch (e) {
-                    this.log(`❌ Error filling password: ${e.message}`, "ERROR");
-                    return false;
-                }
-
-                // Click Continue after password
-                try {
-                    let submitBtn = null;
-                    try { submitBtn = page.locator('button[value="validate"]').first(); await submitBtn.waitFor({ state: 'visible', timeout: 5000 }); } catch { submitBtn = null; }
-                    if (!submitBtn) { try { submitBtn = page.locator('button:has-text("Tiếp tục")').first(); await submitBtn.waitFor({ state: 'visible', timeout: 5000 }); } catch { submitBtn = null; } }
-                    if (!submitBtn) { try { submitBtn = page.locator('button[type="submit"]').first(); await submitBtn.waitFor({ state: 'visible', timeout: 5000 }); } catch { submitBtn = null; } }
-                    if (!submitBtn) { try { submitBtn = page.getByRole('button', { name: /Continue|Tiếp tục/i }); await submitBtn.waitFor({ state: 'visible', timeout: 5000 }); } catch { submitBtn = null; } }
-
-                    if (submitBtn) {
-                        const isEnabled = await submitBtn.isEnabled();
-                        if (!isEnabled) await this.sleep(2000);
-
-                        try {
-                            await Promise.all([
-                                page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => { }),
-                                submitBtn.click({ timeout: 10000 })
-                            ]);
-                        } catch {
-                            await submitBtn.click({ timeout: 10000 });
-                        }
-                        await this.sleep(2000);
-                        this.log(`📍 Current URL: ${page.url()}`);
-                    }
-                } catch (e) {
-                    this.log(`❌ Error clicking Continue after password: ${e.message}`, "ERROR");
-                    return false;
-                }
-            } else {
-                this.log("ℹ️ No password page detected, skipping...");
             }
 
             // Verify account creation
