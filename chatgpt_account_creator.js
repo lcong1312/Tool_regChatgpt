@@ -418,7 +418,7 @@ class ChatGPTAccountCreator {
                 'marionette.enabled': false,
             };
 
-            const context = await firefox.launchPersistentContext(tempDir, {
+            const contextOptions = {
                 headless: this.config.headless !== false,
                 viewport: { width: 1366, height: 768 },
                 userAgent: userAgent,
@@ -432,7 +432,18 @@ class ChatGPTAccountCreator {
                 extraHTTPHeaders: extraHttpHeaders,
                 firefoxUserPrefs: firefoxUserPrefs,
                 timeout: 30000,
-            });
+            };
+
+            if (this.config.proxy) {
+                contextOptions.proxy = {
+                    server: this.config.proxy.server,
+                    username: this.config.proxy.username,
+                    password: this.config.proxy.password,
+                };
+                this.log(`Using proxy: ${this.config.proxy.server}`);
+            }
+
+            const context = await firefox.launchPersistentContext(tempDir, contextOptions);
 
             const pages = context.pages();
             const page = pages.length > 0 ? pages[0] : await context.newPage();

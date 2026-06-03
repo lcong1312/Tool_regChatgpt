@@ -1,5 +1,10 @@
 {
   "max_workers": 3,
   "headless": true,
-  "password": "LEVIETCONG123"
+  "password": "LEVIETCONG123",
+  "proxy": {
+    "server": "http://142.111.67.146:5611",
+    "username": "oxyhhyth",
+    "password": "qeryz3k2beg6"
+  }
 }
