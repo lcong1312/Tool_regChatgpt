@@ -11,6 +11,7 @@ import os from 'os';
 import readline from 'readline';
 import { v4 as uuidv4 } from 'uuid';
 import { faker } from '@faker-js/faker';
+import * as OTPAuth from 'otpauth';
 
 class ChatGPTAccountCreator {
     constructor() {
@@ -86,7 +87,7 @@ class ChatGPTAccountCreator {
         const response = await fetch(`${TEMPMAIL_API}/api/register`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({})
+            body: JSON.stringify({ domain: 'edu.azxcd121.cloud' })
         });
 
         const data = await response.json();
@@ -95,7 +96,7 @@ class ChatGPTAccountCreator {
             throw new Error('Failed to create temp email from Cloudflare Worker');
         }
 
-        // Extract domain from email (e.g. "user@store2003.online" → "store2003.online")
+        // Extract domain from email (e.g. "user@azxcd121.cloud" → "azxcd121.cloud")
         const domain = data.email.split('@')[1];
 
         // Generate names for later use
@@ -128,10 +129,14 @@ class ChatGPTAccountCreator {
         return Math.floor(Math.random() * (50 - 18 + 1)) + 18; // Random age 18-50
     }
 
-    saveAccount(email, password) {
+    saveAccount(email, password, totpSecret = null) {
         try {
-            this.createdAccounts.push({ email, password });
-            fs.appendFileSync(this.accountsFile, `${email}|${password}\n`, 'utf-8');
+            const account = { email, password, totpSecret };
+            this.createdAccounts.push(account);
+            const line = totpSecret
+                ? `${email}|${password}|${totpSecret}\n`
+                : `${email}|${password}\n`;
+            fs.appendFileSync(this.accountsFile, line, 'utf-8');
             this.log(`💾 Saved account to ${this.accountsFile}: ${email}`);
         } catch (e) {
             this.log(`❌ Error saving account: ${e.message}`, "ERROR");
@@ -243,6 +248,124 @@ class ChatGPTAccountCreator {
 
     randomFloat(min, max) {
         return Math.random() * (max - min) + min;
+    }
+
+    async enable2FA(page, email) {
+        const _BASE = "https://chatgpt.com/backend-api";
+
+        try {
+            // Step 1: Get access token from browser session
+            this.log("🔐 Setting up 2FA...");
+            const accessToken = await page.evaluate(async () => {
+                try {
+                    const res = await fetch('/api/auth/session');
+                    const data = await res.json();
+                    return data.accessToken || null;
+                } catch {
+                    return null;
+                }
+            });
+
+            if (!accessToken) {
+                this.log("❌ Could not get access token for 2FA", "ERROR");
+                return null;
+            }
+            this.log("✅ Got access token");
+
+            // Step 2: Enroll TOTP
+            this.log("📝 Enrolling TOTP 2FA...");
+            const enrollRes = await page.evaluate(async (token) => {
+                try {
+                    const res = await fetch('https://chatgpt.com/backend-api/accounts/mfa/enroll', {
+                        method: 'POST',
+                        headers: {
+                            'Authorization': `Bearer ${token}`,
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({ factor_type: 'totp' }),
+                    });
+                    return { status: res.status, data: await res.json() };
+                } catch (e) {
+                    return { status: 0, error: e.message };
+                }
+            }, accessToken);
+
+            if (enrollRes.status !== 200 || !enrollRes.data?.secret) {
+                this.log(`❌ 2FA enroll failed: HTTP ${enrollRes.status} - ${JSON.stringify(enrollRes.data || enrollRes.error)}`, "ERROR");
+                return null;
+            }
+
+            const secret = enrollRes.data.secret;
+            const factorId = enrollRes.data.factor?.id;
+            const sessionId = enrollRes.data.session_id;
+
+            this.log(`✅ Enrolled: factor_id=${factorId?.substring(0, 20)}...`);
+
+            // Step 3: Generate TOTP code
+            const totp = new OTPAuth.TOTP({
+                issuer: 'ChatGPT',
+                label: email,
+                algorithm: 'SHA1',
+                digits: 6,
+                period: 30,
+                secret: OTPAuth.Secret.fromBase32(secret),
+            });
+            const code = totp.generate();
+            this.log(`🔑 Generated TOTP code: ${code}`);
+
+            // Step 4: Activate enrollment
+            this.log("⚡ Activating 2FA enrollment...");
+            const activateRes = await page.evaluate(async ({ token, factorId, sessionId, code }) => {
+                try {
+                    const res = await fetch('https://chatgpt.com/backend-api/accounts/mfa/user/activate_enrollment', {
+                        method: 'POST',
+                        headers: {
+                            'Authorization': `Bearer ${token}`,
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({
+                            factor_id: factorId,
+                            factor_type: 'totp',
+                            session_id: sessionId,
+                            code: code,
+                        }),
+                    });
+                    return { status: res.status, data: await res.json().catch(() => ({})) };
+                } catch (e) {
+                    return { status: 0, error: e.message };
+                }
+            }, { token: accessToken, factorId, sessionId, code });
+
+            if (activateRes.status === 200) {
+                this.log("✅ 2FA activated successfully!");
+                return {
+                    secret: secret,
+                    factor_id: factorId,
+                    session_id: sessionId,
+                    provisioning_uri: `otpauth://totp/ChatGPT?secret=${secret}&issuer=ChatGPT`,
+                    first_code: code,
+                };
+            } else {
+                // Check for idempotent response (already active)
+                const bodyText = JSON.stringify(activateRes.data || '').toLowerCase();
+                if (bodyText.includes('already') || bodyText.includes('active') || bodyText.includes('enabled')) {
+                    this.log("✅ 2FA already active (idempotent)");
+                    return {
+                        secret: secret,
+                        factor_id: factorId,
+                        session_id: sessionId,
+                        provisioning_uri: `otpauth://totp/ChatGPT?secret=${secret}&issuer=ChatGPT`,
+                        first_code: code,
+                    };
+                }
+                this.log(`❌ 2FA activate failed: HTTP ${activateRes.status} - ${JSON.stringify(activateRes.data)}`, "ERROR");
+                return null;
+            }
+
+        } catch (e) {
+            this.log(`❌ 2FA setup error: ${e.message}`, "ERROR");
+            return null;
+        }
     }
 
     async createAccount(accountNumber, totalAccounts) {
@@ -695,32 +818,91 @@ class ChatGPTAccountCreator {
             // Step 10: Click "Tiếp tục" to complete signup
             this.log("🔘 Step 10: Clicking 'Tiếp tục' to complete signup...");
             try {
-                const submitBtn = page.locator('button[value="validate"], button[type="submit"]').first();
-                await submitBtn.waitFor({ state: 'visible', timeout: 5000 });
-                await submitBtn.click({ timeout: 10000 });
-                await this.sleep(5000);
+                let submitBtn = null;
+                try { submitBtn = page.locator('button[value="validate"]').first(); await submitBtn.waitFor({ state: 'visible', timeout: 5000 }); } catch { submitBtn = null; }
+                if (!submitBtn) { try { submitBtn = page.locator('button[type="submit"]').first(); await submitBtn.waitFor({ state: 'visible', timeout: 5000 }); } catch { submitBtn = null; } }
+                if (!submitBtn) { try { submitBtn = page.locator('button:has-text("Tiếp tục"), button:has-text("Continue")').first(); await submitBtn.waitFor({ state: 'visible', timeout: 5000 }); } catch { submitBtn = null; } }
+
+                if (submitBtn) {
+                    await submitBtn.click({ timeout: 10000 });
+                    this.log("✅ Submit button clicked");
+                }
+
+                // Wait for navigation to chatgpt.com
+                try {
+                    await page.waitForURL(url => url.href.includes('chatgpt.com'), { timeout: 15000 });
+                    this.log(`✅ Navigated to chatgpt.com!`);
+                } catch {
+                    await this.sleep(3000);
+                }
                 this.log(`📍 URL: ${page.url()}`);
             } catch (e) {
                 this.log(`❌ Error completing signup: ${e.message}`, "ERROR");
                 return false;
             }
 
-            // Verify account creation
+            // Verify account creation and setup 2FA
             try {
                 const currentUrl = page.url();
-                if (currentUrl.includes('chatgpt.com')) {
+                // Account is created if we're on chatgpt.com OR successfully passed about-you
+                const accountCreated = currentUrl.includes('chatgpt.com') || !currentUrl.includes('about-you');
+
+                if (accountCreated) {
                     this.log(`✅ Account created successfully!`);
-                    this.saveAccount(email, password);
+
+                    // Wait for page to settle on chatgpt.com
+                    if (!currentUrl.includes('chatgpt.com')) {
+                        this.log("⏳ Waiting for chatgpt.com...");
+                        try {
+                            await page.waitForURL(url => url.href.includes('chatgpt.com'), { timeout: 10000 });
+                        } catch {
+                            // Try navigating directly
+                            await page.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded', timeout: 15000 });
+                            await this.sleep(3000);
+                        }
+                    }
+
+                    // Setup 2FA
+                    let totpSecret = null;
+                    try {
+                        await this.sleep(3000); // Wait for session to settle
+                        const mfaResult = await this.enable2FA(page, email);
+                        if (mfaResult) {
+                            totpSecret = mfaResult.secret;
+                            this.log(`🔐 2FA enabled! Secret: ${totpSecret}`);
+                            this.log(`📱 Provisioning URI: ${mfaResult.provisioning_uri}`);
+                        } else {
+                            this.log("⚠️ 2FA setup failed, saving account without 2FA", "WARNING");
+                        }
+                    } catch (mfaErr) {
+                        this.log(`⚠️ 2FA error: ${mfaErr.message}`, "WARNING");
+                    }
+
+                    this.saveAccount(email, password, totpSecret);
                     await context.close();
                     return true;
                 } else {
-                    this.log(`⚠️ Unexpected Error after signup`, "WARNING");
-                    this.saveAccount(email, password);
+                    this.log(`⚠️ Unexpected URL after signup: ${currentUrl}`, "WARNING");
+                    // Still try 2FA in case account was created
+                    let totpSecret = null;
+                    try {
+                        // Try navigating to chatgpt.com first
+                        await page.goto('https://chatgpt.com/', { waitUntil: 'domcontentloaded', timeout: 15000 });
+                        await this.sleep(3000);
+                        const mfaResult = await this.enable2FA(page, email);
+                        if (mfaResult) {
+                            totpSecret = mfaResult.secret;
+                            this.log(`🔐 2FA enabled! Secret: ${totpSecret}`);
+                        }
+                    } catch (mfaErr) {
+                        this.log(`⚠️ 2FA error: ${mfaErr.message}`, "WARNING");
+                    }
+                    this.saveAccount(email, password, totpSecret);
                     await context.close();
                     return true;
                 }
             } catch (e) {
-                this.log(`⚠️ Error verifying account creation`, "WARNING");
+                this.log(`⚠️ Error verifying account creation: ${e.message}`, "WARNING");
                 this.saveAccount(email, password);
                 await context.close();
                 return true;
@@ -794,7 +976,8 @@ class ChatGPTAccountCreator {
         if (this.createdAccounts.length > 0) {
             console.log("\n✅ CREATED ACCOUNTS:");
             this.createdAccounts.forEach((account, i) => {
-                console.log(`  ${i + 1}. ${account.email}`);
+                const mfaStatus = account.totpSecret ? `🔐 2FA: ${account.totpSecret}` : "⚠️ No 2FA";
+                console.log(`  ${i + 1}. ${account.email} | ${mfaStatus}`);
             });
         }
 
