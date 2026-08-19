@@ -418,6 +418,16 @@ class ChatGPTAccountCreator {
                 'marionette.enabled': false,
             };
 
+            if (this.config.proxy) {
+                const proxyUrl = new URL(this.config.proxy.server);
+                firefoxUserPrefs['network.proxy.type'] = 1;
+                firefoxUserPrefs['network.proxy.http'] = proxyUrl.hostname;
+                firefoxUserPrefs['network.proxy.http_port'] = parseInt(proxyUrl.port);
+                firefoxUserPrefs['network.proxy.ssl'] = proxyUrl.hostname;
+                firefoxUserPrefs['network.proxy.ssl_port'] = parseInt(proxyUrl.port);
+                firefoxUserPrefs['network.proxy.share_proxy_settings'] = true;
+            }
+
             const contextOptions = {
                 headless: this.config.headless !== false,
                 viewport: { width: 1366, height: 768 },
